@@ -6,6 +6,8 @@ from stat import S_IFDIR, S_IFLNK, S_IFREG
 from sys import argv, exit
 from time import time
 from fuse import FUSE, FuseOSError, Operations
+import coda_remote.venus
+import sqlite3
 
 if not hasattr(__builtins__, 'bytes'):
 	bytes = str
@@ -16,12 +18,33 @@ class FS(Operations):
 	self.data stores filedata, self.fd is the filedescriptor"""
 
    	def __init__(self):
+		"""Database to store file information"""
+		self.conn = sqlite3.connect('files.db')
+		self.op = self.conn.cursor()
         	self.files = {}
         	self.data = defaultdict(bytes)
         	self.fd = 0
+		try:
+			self.op.execute(''' CREATE TABLE inodes (
+				path		PRIMARY KEY, 
+				st_mode		INT NOT NULL,
+				st_ctime	INT NOT NULL,
+				st_mtime 	INT NOT NULL,
+				st_atime 	INT NOT NULL,
+				st_nlink	INT NOT NULL,
+				f_dir		BLOB,
+				data		BLOB
+			) ''' )	
+		except sqlite3.OperationalError:
+			pass	
+
         	now = time()
-        	self.files['/'] = dict(st_mode=(S_IFDIR | 0755), st_ctime=now,
-                               st_mtime=now, st_atime=now, st_nlink=2)
+		st_mode =  (S_IFDIR | 0755) 
+		st_mtime = st_atime = st_ctime = now
+		st_nlink = 2
+		f_dir = list()
+        	self.files['/'] = dict(st_mode=(S_IFDIR | 0755), st_ctime = now,
+                               st_mtime = now, st_atime = now, st_nlink = 2, f_dir = list())
 
     	def chmod(self, path, mode):
         	self.files[path]['st_mode'] &= 0770000
@@ -39,6 +62,13 @@ class FS(Operations):
         	self.files[path] = dict(st_mode=(S_IFREG | mode), st_nlink=1,
                                 st_size=0, st_ctime=time(), st_mtime=time(),
                                 st_atime=time())
+
+		#Not root directory
+		if len(path.split('/')) != 2:
+			self.files[path[:path.rfind('/')]]['f_dir'].append(path)
+		else:
+		#Root directory
+			self.files['/']['f_dir'].append(path)
 
         	self.fd += 1
         	return self.fd
@@ -70,7 +100,14 @@ class FS(Operations):
 		print "Making directory ", path, mode
         	self.files[path] = dict(st_mode=(S_IFDIR | mode), st_nlink=2,
                                 st_size=0, st_ctime=time(), st_mtime=time(),
-                                st_atime=time())
+                                st_atime=time(), f_dir = [])
+
+		#Not root directory
+		if len(path.split('/')) != 2:
+			self.files[path[:path.rfind('/')]]['f_dir'].append(path)
+		else:
+		#Root directory
+			self.files['/']['f_dir'].append(path)
 
         	self.files['/']['st_nlink'] += 1
 
@@ -85,10 +122,10 @@ class FS(Operations):
 
     	def readdir(self, path, fh):
 		"""Reads directory as specified by path, filehandler is empty for now,
-		gotta fix multi-level directories"""
-		print "Reading directory ", path, fh, "\n", self.files
-		print "Stuff ", [str(x[1:]) for x in self.files if x != '/' and x == path]
-        	return ['.', '..'] + [x[1:] for x in self.files if x != '/' and x.startswith(path) == True]
+		gotta fix multi-level directories - How does this work?
+		A dir. inside a dir., /hello/dude starts with the prefix /hello/ which
+		only to those of path + 1"""
+        	return ['.', '..'] + [x[x.rfind('/') + 1:] for x in self.files[path]['f_dir']]
 
     	def readlink(self, path):
 		"""Only reads the link and returns data"""
@@ -107,11 +144,24 @@ class FS(Operations):
 		"""Remove old filename and insert new one"""
     		self.files[new] = self.files.pop(old)
 
+		if len(old.split('/')) != 2:
+			self.files[new[:new.rfind('/')]]['f_dir'].remove(old)
+			self.files[new[:new.rfind('/')]]['f_dir'].append(new)
+		else:
+			self.files['/']['f_dir'].remove(old)
+			self.files['/']['f_dir'].append(new)
+
     	def rmdir(self, path):
 		"""Remove directory by popping old filepath
 		and removing file counter, have to implement
 		recursive removal rm -rf"""
         	self.files.pop(path)
+
+		if len(old.split('/')) != 2:
+			self.files[new[:new.rfind('/')]]['f_dir'].remove(old)
+		else:
+			self.files['/']['f_dir'].remove(old)
+
         	self.files['/']['st_nlink'] -= 1
 
     	def setxattr(self, path, name, value, options, position=0):
