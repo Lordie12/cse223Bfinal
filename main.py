@@ -7,7 +7,7 @@ from sys import argv, exit
 from time import time
 from fuse import FUSE, FuseOSError, Operations
 import coda_remote.venus
-import sqlite3
+import json, pickle, os
 
 if not hasattr(__builtins__, 'bytes'):
 	bytes = str
@@ -19,32 +19,22 @@ class FS(Operations):
 
    	def __init__(self):
 		"""Database to store file information"""
-		self.conn = sqlite3.connect('files.db')
-		self.op = self.conn.cursor()
-        	self.files = {}
+        	
+		self.files = {}
         	self.data = defaultdict(bytes)
         	self.fd = 0
-		try:
-			self.op.execute(''' CREATE TABLE inodes (
-				path		PRIMARY KEY, 
-				st_mode		INT NOT NULL,
-				st_ctime	INT NOT NULL,
-				st_mtime 	INT NOT NULL,
-				st_atime 	INT NOT NULL,
-				st_nlink	INT NOT NULL,
-				f_dir		BLOB,
-				data		BLOB
-			) ''' )	
-		except sqlite3.OperationalError:
-			pass	
+		self.venus = Venus()		
 
         	now = time()
 		st_mode =  (S_IFDIR | 0755) 
 		st_mtime = st_atime = st_ctime = now
-		st_nlink = 2
+		st_nlink = int(2)
 		f_dir = list()
         	self.files['/'] = dict(st_mode=(S_IFDIR | 0755), st_ctime = now,
                                st_mtime = now, st_atime = now, st_nlink = 2, f_dir = list())
+
+		if not os.path.exists('/cache'):
+			os.mkdir('/cache')
 
     	def chmod(self, path, mode):
         	self.files[path]['st_mode'] &= 0770000
@@ -59,16 +49,25 @@ class FS(Operations):
 		"""Create a file at the specified path with the specified mode,
 		mode is by default S_IFREG which is the linux equivalent
 		of a regular file ORed with the mode specified"""
+
         	self.files[path] = dict(st_mode=(S_IFREG | mode), st_nlink=1,
                                 st_size=0, st_ctime=time(), st_mtime=time(),
                                 st_atime=time())
-
+		
 		#Not root directory
 		if len(path.split('/')) != 2:
 			self.files[path[:path.rfind('/')]]['f_dir'].append(path)
+			#Store parentdir metadata
+			pickle.dump(self.files[path[:path.rfind('/')]], open('/cache' + path[:path.rfind('/')] + '.dmeta', 'w+')) 
 		else:
 		#Root directory
 			self.files['/']['f_dir'].append(path)
+			pickle.dump(self.files, open('/cache/root.dmeta', 'w+'))
+
+		#Store newfile meta
+		pickle.dump(self.files[path], open('/cache' + path + '.meta', 'w+'))
+		f = open('/cache' + path, 'w')
+		f.close()
 
         	self.fd += 1
         	return self.fd
@@ -97,27 +96,31 @@ class FS(Operations):
 		"""Create a new directory with the default linux flag
 		for a directory, S_IFDIR ORed with any additional modes
 		specified by the application"""
-		print "Making directory ", path, mode
         	self.files[path] = dict(st_mode=(S_IFDIR | mode), st_nlink=2,
                                 st_size=0, st_ctime=time(), st_mtime=time(),
                                 st_atime=time(), f_dir = [])
 
-		#Not root directory
+		if not os.path.exists('/cache' + path):
+			os.mkdir('/cache' + path)
+
 		if len(path.split('/')) != 2:
 			self.files[path[:path.rfind('/')]]['f_dir'].append(path)
+			#Store parentdir metadata
+			pickle.dump(self.files[path[:path.rfind('/')]], open('/cache' + path[:path.rfind('/')] + '.dmeta', 'w+')) 
+			#Store newdir metadata
+			pickle.dump(self.files[path], open('/cache' + path + '.dmeta', 'w+'))
 		else:
-		#Root directory
 			self.files['/']['f_dir'].append(path)
+			pickle.dump(self.files[path], open('/cache' + path + '.dmeta', 'w+'))
 
         	self.files['/']['st_nlink'] += 1
+		pickle.dump(self.files, open('/cache/root.dmeta', 'w+'))
 
     	def open(self, path, flags):
         	self.fd += 1
-		print "Opening"
         	return self.fd
 
     	def read(self, path, size, offset, fh):
-		print "Reading"
         	return self.data[path][offset:offset + size]
 
     	def readdir(self, path, fh):
@@ -129,7 +132,6 @@ class FS(Operations):
 
     	def readlink(self, path):
 		"""Only reads the link and returns data"""
-		print "Reading link"
         	return self.data[path]
 
     	def removexattr(self, path, name):
@@ -194,6 +196,10 @@ class FS(Operations):
     	def write(self, path, data, offset, fh):
         	self.data[path] = self.data[path][:offset] + data
         	self.files[path]['st_size'] = len(self.data[path])
+		pickle.dump(self.files[path], open('/cache' + path + '.meta', 'w+'))
+		f = open('/cache' + path, 'w+')
+		f.write(data)
+		f.close()
         	return len(data)
 
 
