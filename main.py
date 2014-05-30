@@ -11,7 +11,6 @@ from pyftpdlib.log import logger
 from pyftpdlib.ioloop import _config_logging
 import json, pickle, os, logging, sys, rpyc, threading
 from thread import start_new_thread
-from rpyc.utils.server import ThreadedServer
 
 if not hasattr(__builtins__, 'bytes'):
 	bytes = str
@@ -285,5 +284,6 @@ if __name__ == '__main__':
 	_config_logging()
 	#start_new_thread(start_here, (None,))
 
-    	fuse = FUSE(FS(), argv[1], foreground = True)
+	start_new_thread(FUSE, (FS(), argv[1], foreground=True)
+    	#fuse = FUSE(FS(), argv[1], foreground = True)
 	logger.info('File System mounted at /%s' % argv[1])
