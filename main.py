@@ -5,12 +5,14 @@ from errno import ENOENT
 from stat import S_IFDIR, S_IFLNK, S_IFREG
 from sys import argv, exit
 from time import time
+
 from fuse import FUSE, FuseOSError, Operations
 from coda_remote.venus import Venus
 from pyftpdlib.log import logger
 from pyftpdlib.ioloop import _config_logging
 import json, pickle, os, logging, sys, rpyc, threading
 from thread import start_new_thread
+import threading, socket
 
 if not hasattr(__builtins__, 'bytes'):
 	bytes = str
@@ -33,18 +35,31 @@ class FS(Operations):
 		st_nlink = 2
 		f_dir = list()
 
-		#If root metadata exists, then load it in-memory 
+		if not os.path.exists('/cache'):
+			os.mkdir('/cache')
+		#If root metadata exists, then load it in-memory
+		#TODO: change this for disconnected operations vs.
+		# new guy coming online first time 
 		if os.path.isfile('/cache/root.dmeta'):
 			logger.info('Root metadata exists, loading into memory')
 			self.files = pickle.load(open('/cache/root.dmeta', 'r'))
+			self.venus.meta(pickle.dumps(self.files['/']))
+
+		elif self.venus.is_exist()['Status'] == True:
+			logger.info('Root metadata does not exist locally but remotely')
+			open('/cache/root.dmeta', 'w+').write(self.venus.is_exist()['Content'])
+
 		else:
-		#Recreate new root directory
+			logger.info('Root metadata does not exist locally and remotely, '+\
+				'creating locally and uploading to remote')
+			#Recreate new root directory
         		self.files['/'] = dict(st_mode=(S_IFDIR | 0755), st_ctime = now,
                                st_mtime = now, st_atime = now, st_nlink = 2, f_dir = list())
+	
+			pickle.dump(self.files, open('/cache/root.dmeta', 'w+'))
+			self.venus.meta(pickle.dumps(self.files['/']))
 
-		if not os.path.exists('/cache'):
-			os.mkdir('/cache')
-
+	
     	def chmod(self, path, mode):
 		logger.info("Changing permissions of file %s into %s" % (path, mode))
         	self.files[path]['st_mode'] &= 0770000
@@ -61,7 +76,7 @@ class FS(Operations):
 		f = open('/cache' + path + '.meta', 'w')
 		f.write(self.files[path])
 		f.close()
-
+	
     	def create(self, path, mode):
 		"""Create a file at the specified path with the specified mode,
 		mode is by default S_IFREG which is the linux equivalent
@@ -73,23 +88,32 @@ class FS(Operations):
 
 		logger.info("Creating a new file %s with mode %s" % (path, mode))
 		res = self.venus.create(path, mode)
-	
+	 
 		if res['Status'] == False:
+			logger.info('Status is false')
 			#File does not exist
 			self.files[path] = dict(st_mode=(S_IFREG | mode), st_nlink=1,
 					st_size=0, st_ctime=time(), st_mtime=time(),
 					st_atime=time())
-			
+		
+			self.venus.update_meta(path, pickle.dumps(self.files[path]))	
+	
 			#Not root directory
 			if len(path.split('/')) != 2:
-				self.files[path[:path.rfind('/')]]['f_dir'].append(path)
-				#Store parentdir metadata
-				pickle.dump(self.files[path[:path.rfind('/')]], open('/cache' + path[:path.rfind('/')] + '.dmeta', 'w+')) 
+				logger.info('File created in non-root dir')
+				newpath = path[:path.rfind('/')]
+				self.files[newpath]['f_dir'].append(path)
+				#Store parentdir metadata in server
+				self.venus.update_meta(newpath, pickle.dumps(self.files[newpath]))
+	
+				pickle.dump(self.files[newpath], open('/cache' + newpath + '.dmeta', 'w+'))
 			else:
 			#Root directory
+				logger.info('File created in root directory')
 				self.files['/']['f_dir'].append(path)
-				pickle.dump(self.files, open('/cache/root.dmeta', 'w+'))
+				self.venus.update_meta('/', pickle.dumps(self.files['/']))
 
+			pickle.dump(self.files, open('/cache/root.dmeta', 'w')) 
 			#Store newfile meta
 			pickle.dump(self.files[path], open('/cache' + path + '.meta', 'w+'))
 			f = open('/cache' + path, 'w')
@@ -110,7 +134,7 @@ class FS(Operations):
                         else:
                         #Root directory
                                 self.files['/']['f_dir'].append(path)
-                                pickle.dump(self.files, open('/cache/root.dmeta', 'w+'))
+                                pickle.dump(self.files, open('/cache/root.dmeta', 'w'))
 
                         #Store newfile meta
 			f = open('/cache' + path + '.meta', 'w+')
@@ -129,8 +153,9 @@ class FS(Operations):
             		raise FuseOSError(ENOENT)
 
         	return self.files[path]
-
+	
     	def getxattr(self, path, name, position = 0):
+		logger.info('Getting extended attributes of %s'  % path)
         	attrs = self.files[path].get('attrs', {})
 
         	try:
@@ -140,9 +165,10 @@ class FS(Operations):
             		return ''
 
     	def listxattr(self, path):
+		logger.info('Listing extended attributes of %s' % path)
         	attrs = self.files[path].get('attrs', {})
         	return attrs.keys()
-
+	
     	def mkdir(self, path, mode):
 		"""Create a new directory with the default linux flag
 		for a directory, S_IFDIR ORed with any additional modes
@@ -175,6 +201,7 @@ class FS(Operations):
 
     	def read(self, path, size, offset, fh):
 		logger.info("Reading %d bytes of file %s from offset %d" % (size, path, offset))
+		self.venus.read(path)
         	return self.data[path][offset:offset + size]
 
     	def readdir(self, path, fh):
@@ -187,18 +214,21 @@ class FS(Operations):
 
     	def readlink(self, path):
 		"""Only reads the link and returns data"""
+		logger.info('Reading link of %s' % path)
         	return self.data[path]
-
+	
     	def removexattr(self, path, name):
+		logger.info('Remove extended attributes of %s' % path)
         	attrs = self.files[path].get('attrs', {})
 
         	try:
             		del attrs[name]
         	except KeyError:
             		pass        # Should return ENOATTR
-
+	
     	def rename(self, old, new):
 		"""Remove old filename and insert new one"""
+		logger.info('Renaming %s to %s' % (old, new))
     		self.files[new] = self.files.pop(old)
 
 		if len(old.split('/')) != 2:
@@ -222,28 +252,33 @@ class FS(Operations):
 
         	self.files['/']['st_nlink'] -= 1
 
+	
     	def setxattr(self, path, name, value, options, position=0):
         	"""Set extended attributes"""
+		logger.info('Setting extended attributes')
         	attrs = self.files[path].setdefault('attrs', {})
         	attrs[name] = value
 
     	def statfs(self, path):
+		logger.info('Calling statfs')
         	return dict(f_bsize = 512, f_blocks = 4096, f_bavail = 2048)
 
     	def symlink(self, target, source):
+		logger.info('Creating symlink')
         	self.files[target] = dict(st_mode=(S_IFLNK | 0777), st_nlink=1,
                                   st_size=len(source))
 
         	self.data[target] = source
 
     	def truncate(self, path, length, fh = None):
+		logger.info('Calling truncate')
         	self.data[path] = self.data[path][:length]
         	self.files[path]['st_size'] = length
-
+	
     	def unlink(self, path):
 		if path not in self.files.keys():
 			raise Exception('File does not exist')
-		logger.info('File %s deleted' % path)
+		logger.info('File %s unlinked and deleted' % path)
         	self.files.pop(path)
 		self.files['/']['f_dir'].remove(path)
 		os.remove('/cache' + path)
@@ -251,6 +286,7 @@ class FS(Operations):
 		pickle.dump(self.files, open('/cache/root.dmeta', 'w+'))
 
     	def utimens(self, path, times=None):
+		logger.info('Calling utimens')
         	now = time()
         	atime, mtime = times if times else (now, now)
         	self.files[path]['st_atime'] = atime
@@ -260,21 +296,18 @@ class FS(Operations):
 		logger.info("Writing into file %s from offset %d" % (path, offset))
         	self.data[path] = self.data[path][:offset] + data
         	self.files[path]['st_size'] = len(self.data[path])
+		self.files[path]['st_mtime'] = time()
+		self.files[path]['st_atime'] = time()
 		pickle.dump(self.files[path], open('/cache' + path + '.meta', 'w+'))
+		pickle.dump(self.files, open('/cache/root.dmeta', 'w+'))
+	
 		f = open('/cache' + path, 'w+')
 		f.write(data)
 		f.close()
+		
+		self.venus.write(path, data, pickle.dumps(self.files[path]))
         	return len(data)
 
-
-class Service(rpyc.Service):
-	def exposed_hello(self):
-		logger.info('Server says Hello')
-
-def start_here(t):
-	logger.info('Client RPC Started')
-	t = ThreadedServer(Service, port = 5000)
-	t.start()
 
 if __name__ == '__main__':
     	if len(argv) != 2:
@@ -282,8 +315,6 @@ if __name__ == '__main__':
         	exit(1)
 
 	_config_logging()
-	#start_new_thread(start_here, (None,))
-
-	start_new_thread(FUSE, (FS(), argv[1], foreground=True)
-    	#fuse = FUSE(FS(), argv[1], foreground = True)
+	
 	logger.info('File System mounted at /%s' % argv[1])
+    	fuse = FUSE(FS(), argv[1], foreground = True)
