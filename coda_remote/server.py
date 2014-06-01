@@ -1,6 +1,6 @@
 #!/usr/bin/python
 
-import rpyc, os, pickle, socket, sys, threading
+import rpyc, os, pickle, socket, sys, threading, getopt, hashlib
 from pyftpdlib.log import logger
 from pyftpdlib.ioloop import _config_logging
 from rpyc.utils.server import *
@@ -9,15 +9,32 @@ from time import *
 from thread import start_new_thread
 _config_logging()
 
+known_clients = []
+sname = ''
 lock = threading.Lock()
 log = {}
-if os.path.isfile('/servercache/log.txt'):
-	log = pickle.load(open('/servercache/log.txt', 'r'))
+if os.path.isfile(sname + '/log.txt'):
+	log = pickle.load(open(sname + '/log.txt', 'r'))
 else:
 	log = dict(CP=0, Clock=0, OPS=[])
 
 clock = log['Clock']
 files = {}
+
+def invalidate_copies(known_clients):
+	for clients in known_clients:
+		logger.info('Invaliding %s' % clients)
+		#Sending new metadata to all clients server knows of
+		if True: #clients != self._conn.root:
+			try:
+				clients.invalidate(pickle.dumps(open(sname + '/root.dmeta', 'r').read()))
+			except:
+				pass
+
+def myhash(inp):
+	h = hashlib.new('ripemd160')
+	h.update(inp)
+	return h.hexdigest()
 
 class MyService(rpyc.Service):
 	def process_log(self, ID):
@@ -33,68 +50,78 @@ class MyService(rpyc.Service):
 
 			if log['OPS'][r]['OP'] == 'CREATE':
 				logger.info('Processing CREATE with CP %d ID %d' % (log['CP'], ID))
-				if os.path.isfile('/servercache' + path):
-					res = {'Status' : True, 'Content-x' : open('/servercache' + path).read(),\
-						'Meta' : open('/servercache' + path + '.meta', 'r').read()}
+				if os.path.isfile(sname + path):
+					res = {'Status' : True, 'Content-x' : open(sname + path).read(),\
+						'Meta' : open(sname + path + '.meta', 'r').read()}
 				else:
 					#Create an empty file at server
 					meta = dict(st_mode=(S_IFREG | 33188), st_nlink=1,
 							st_size=0, st_ctime=time(), st_mtime=time(),
 							st_atime=time())
 					
-					open('/servercache' + path, 'w+').close()
-					pickle.dump(meta, open('/servercache' + path + '.meta', 'w+'))
+					open(sname + path, 'w+').close()
+					pickle.dump(meta, open(sname + path + '.meta', 'w+'))
 					res = {'Status' : False, 'Content-x': '', 'Meta' : ''}
 
 				log['CP'] += 1
-				pickle.dump(log, open('/servercache/log.txt', 'w+'))
+				pickle.dump(log, open(sname + '/log.txt', 'w+'))
 
 				logger.info('New CREATED metadata')
-				#pickle.dump(files, open('/servercache/root.dmeta', 'w'))
 
 			elif log['OPS'][r]['OP'] == 'READ':
-				pass
+				logger.info('Processing READ with CP %d ID %d' % (log['CP'], ID))
+				if os.path.isfile(sname + path):
+					res = {'Status': True, 'Content-x' : open(sname + path).read(),\
+						'Meta' : open(sname + path + '.meta', 'r').read()}
+				else:
+					res = {'Status' : False}
+
+				log['CP'] += 1
+				pickle.dump(log, open(sname + '/log.txt', 'w+'))
 
 			elif log['OPS'][r]['OP'] == 'WRITE': 
 				logger.info('Processing WRITE with CP %d ID %d' % (log['CP'], ID))
-				open(path, 'w+').write(log['OPS'][r]['CONTENT'])
+				#Writing into server copy
+				open(sname + path, 'w+').write(log['OPS'][r]['CONTENT'])
 
+				#Incrementing commit point and rewriting new log info to log
 				log['CP'] += 1
-				pickle.dump(log, open('/servercache/log.txt', 'w+'))
+				pickle.dump(log, open(sname + '/log.txt', 'w+'))
 
+				#Setting result to true, writing new metadata to root.dmeta
 				res = {'Status' : True}
 				files[path] = pickle.loads(log['OPS'][r]['META'])
-				logger.info('New write metadata received %s' % log['OPS'][r]['META'])
-				pickle.dump(files, open('/servercache/root.dmeta', 'w+'))
-				open('/servercache' + path, 'w').write(log['OPS'][r]['CONTENT'])
+				pickle.dump(files, open(sname + '/root.dmeta', 'w+'))
 
 		return res
 
+	def exposed_is_dc(self):
+		return None
+	
 	def exposed_is_exist(self):
-		if os.path.isfile('/servercache/root.dmeta'):
-			#logger.info('Metadata exists on server only')
-			return {'Status': True, 'Content' : open('/servercache/root.dmeta', 'r').read()}
+		if os.path.isfile(sname + '/root.dmeta'):
+			return {'Status': True, 'Content' : open(sname + '/root.dmeta', 'r').read()}
 		else:
 			return {'Status': False}	
 
 	def exposed_update_meta(self, path, data):
 		global files	
 	
-		if os.path.isfile('/servercache/root.dmeta'):
-			files = pickle.load(open('/servercache/root.dmeta', 'r'))
+		if os.path.isfile(sname + '/root.dmeta'):
+			files = pickle.load(open(sname + '/root.dmeta', 'r'))
 
 		files[path] = pickle.loads(data)
-		pickle.dump(files, open('/servercache/root.dmeta', 'w'))
+		pickle.dump(files, open(sname + '/root.dmeta', 'w'))
 	
 	def exposed_rootmeta(self, data):
 		global files
 		logger.info('Received new metadata from client')
 		try:
-			os.mkdir('/servercache')
+			os.mkdir(sname)
 		except OSError:
 			pass
 		files['/'] = pickle.loads(data)
-		pickle.dump(files, open('/servercache/root.dmeta', 'w'))
+		pickle.dump(files, open(sname + '/root.dmeta', 'w'))
 		return True
 	
 	def exposed_create(self, path):
@@ -104,8 +131,8 @@ class MyService(rpyc.Service):
 
 		with lock:
 			logger.info('Create acquiring lock')
-			if os.path.isfile('/servercache/log.txt'):
-				log = pickle.load(open('/servercache/log.txt', 'r'))
+			if os.path.isfile(sname + '/log.txt'):
+				log = pickle.load(open(sname + '/log.txt', 'r'))
 
 			log['OPS'].append(dict(ID=clock, TIME=ctime(time()), ADDR=self._conn._config['endpoints'][1][0] + \
 				':' + str(self._conn._config['endpoints'][1][1]), OP='CREATE', PATH=path))
@@ -113,10 +140,13 @@ class MyService(rpyc.Service):
 			ID = clock
 			clock += 1
 			log['Clock'] += 1
-			pickle.dump(log, open('/servercache/log.txt', 'w+'))
-			logger.info('ID %d and File check for %s' % (ID, '/servercache' + path))
+			pickle.dump(log, open(sname + '/log.txt', 'w+'))
+			logger.info('ID %d and File check for %s' % (ID, sname + path))
 
-		return self.process_log(ID)
+		res = self.process_log(ID)
+
+		start_new_thread(invalidate_copies, (known_clients,))
+		return res
 
 	def exposed_read(self, path):		
 		global log, clock
@@ -125,15 +155,17 @@ class MyService(rpyc.Service):
 		
 		logger.info('Reading from %s' % path)
 		log = dict(CP=0, OPS=[])
-		if os.path.isfile('/servercache/log.txt'):
-			log = pickle.load(open('/servercache/log.txt', 'r'))
+		if os.path.isfile(sname + '/log.txt'):
+			log = pickle.load(open(sname + '/log.txt', 'r'))
 
 		log['OPS'].append(dict(ID=clock, TIME=ctime(time()), ADDR= self._conn._config['endpoints'][1][0] +\
                           ':' + str(self._conn._config['endpoints'][1][1]), OP='READ', PATH=path))
 		ID = clock
 		clock += 1
 		log['Clock'] += 1
-		pickle.dump(log, open('/servercache/log.txt', 'w+'))
+		pickle.dump(log, open(sname + '/log.txt', 'w+'))
+	
+		return self.process_log(ID)
 
 	def exposed_write(self, path, data, meta):
 		
@@ -144,18 +176,38 @@ class MyService(rpyc.Service):
 			log['OPS'].append(dict(ID=clock, TIME=ctime(time()), ADDR= self._conn._config['endpoints'][1][0] +\
 			':' + str(self._conn._config['endpoints'][1][1]), OP='WRITE', PATH=path, CONTENT = data, META = meta))
 
-			pickle.dump(log, open('/servercache/log.txt', 'w+'))
+			pickle.dump(log, open(sname + '/log.txt', 'w+'))
 		
-			logger.info(log)	
 			ID = clock
 			clock += 1
 			log['Clock'] += 1
 
-		return self.process_log(ID)
+		res = self.process_log(ID)
+
+		'''
+		Unable to pickle and invalidate clients,
+		so lets call update metadata on each FUSE operation
+		#Invalidating everyone else's copy here
+		for clients in known_clients:
+			#Sending new metadata to all clients server knows of
+			if True: #clients != self._conn.root:
+				try:
+					clients.invalidate(pickle.dumps(open(sname + '/root.dmeta', 'r').read()))
+				except:
+					pass
+		'''
+		return res
+
+	def exposed_fetch_meta(self):
+		if os.path.isfile(sname + '/root.dmeta'):
+			return open(sname + '/root.dmeta', 'r').read()
+		else:
+			return None
 
 	def on_connect(self):
-		'''global log, files
+		global known_clients , lock
 
+		'''
 		if os.path.isfile('/servercache/root.dmeta'):
 			files = pickle.load(open('/servercache/root.dmeta', 'r'))
 		else:
@@ -173,15 +225,26 @@ class MyService(rpyc.Service):
 
 
 if __name__ == "__main__":
-	hostname = 'localhost'
-	port = 2222
-    	t = ThreadedServer(MyService, hostname=hostname, port = port)
+
+	try:
+		opts, args = getopt.getopt(sys.argv[1:], "h:p:", ["host=", "port="])
+	except:
+		print './server.py -h hostname -p portnumber'
+		sys.exit(2) 
+
+	for opt, args in opts:   
+		if opt in ['-h', '--host']:
+			hostname = args
+		elif opt in ['-p', '--port']:
+			port = int(args)
+
+	t = ThreadedServer(MyService, hostname=hostname, port = port)
 	logger.info('Server started at host %s and port %d' % (hostname, port))
 	try:
-		pass
-    		start_new_thread(t.start, ())
-	except EOFError:
+		sname = hostname + str(port) + '/scache'
+		sname = '/' + myhash(sname)
+    		t.start()
+	except:
 		raise
-	raw_input('')
 	
 		
