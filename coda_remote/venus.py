@@ -35,6 +35,28 @@ class Venus:
 			except:	
 				continue
 
+	def reintegration(self):
+		log = None
+		if os.path.isfile(cachedir + '/log.txt'):
+			try:
+				log = pickle.load(open(cachedir + '/log.txt'), 'r')
+			except: 
+				pass
+	
+		print 'Calling reintegration'
+		#AMAZING REINTEGRATION, SOME PRO CODING DONE HERE	
+		if log is not None:
+			for line in log:
+				if line['ops'] == 'update_meta':
+					self.update_meta(line['path'], line['meta'], line['dc'])
+				elif line['ops'] == 'create':
+					self.create(line['path'], line['mode'], line['dc'])
+				elif line['ops'] == 'write':
+					self.write(line['path'], line['data'], line['meta'], line['dc'])
+
+				log.remove(line)
+				pickle.dump(log, open(cachedir + '/log.txt', 'w'))
+
 	def create(self, path, mode, dc):
 		#If remote file also does not exist, then create
 		if dc == False:
@@ -51,8 +73,9 @@ class Venus:
 		if dc == False:
 			return self.conn.root.read(path)
 
-	def write(self, path, data, meta):
-		return self.conn.root.write(path, data, meta)
+	def write(self, path, data, meta, dc):
+		if dc == False:
+			return self.conn.root.write(path, data, meta)
 
 	def meta(self, data, dc):
 		if dc == False:
@@ -71,4 +94,4 @@ class Venus:
 				pass
 			else:
 				f = open(cachedir + '/root.dmeta', 'w')
-			f.write(res)
+				f.write(res)

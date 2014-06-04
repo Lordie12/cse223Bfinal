@@ -4,7 +4,7 @@ from collections import defaultdict
 from errno import ENOENT
 from stat import S_IFDIR, S_IFLNK, S_IFREG
 from sys import argv, exit
-from time import time
+from time import *
 
 from fuse import FUSE, FuseOSError, Operations
 from coda_remote.venus import Venus
@@ -31,7 +31,15 @@ class FS(Operations):
 		self.files = {}
         	self.data = defaultdict(bytes)
         	self.fd = 0
-			
+		self.log = []
+		#For reintegration, load log if it exists
+		#We write into log during disconnected operations
+		if os.path.isfile(cachedir + '/log.txt'):
+			try:
+				self.log = pickle.load(open(cachedir + '/log.txt', 'r'))
+			except:
+				pass
+	
 		#Disconnected operation code comes here
 		self.venus = Venus(cachedir)	
 		self.dc = False
@@ -57,6 +65,7 @@ class FS(Operations):
 		if os.path.isfile(cachedir + '/root.dmeta'):
 			logger.info('Root metadata exists, loading into memory')
 			self.files = pickle.load(open(cachedir + '/root.dmeta', 'r'))
+			print self.files
 			self.venus.meta(pickle.dumps(self.files['/']), self.dc)
 
 		elif is_exist is not None and is_exist['Status'] == True:
@@ -70,7 +79,7 @@ class FS(Operations):
         		self.files['/'] = dict(st_mode=(S_IFDIR | 0755), st_ctime = now,
                                st_mtime = now, st_atime = now, st_nlink = 2, f_dir = list())
 	
-			pickle.dump(self.files, open(cachedir + '/root.dmeta', 'w+'))
+			pickle.dump(self.files, open(cachedir + '/root.dmeta', 'w'))
 			self.venus.meta(pickle.dumps(self.files['/']), self.dc)
 
 	
@@ -86,6 +95,10 @@ class FS(Operations):
 			self.venus.is_dc()
 		except AttributeError:
 			self.dc = True
+
+		if self.dc == False:
+			self.venus.reintegration()
+
 		self.venus.fetch_meta(self.dc)
 		self.files = pickle.load(open(cachedir + '/root.dmeta','r'))
         	self.files[path]['st_mode'] &= 0770000
@@ -106,6 +119,8 @@ class FS(Operations):
 			self.venus.is_dc()
 		except AttributeError:
 			self.dc = True
+		if self.dc == False:
+			self.venus.reintegration()
 		self.venus.fetch_meta(self.dc)
 		self.files = pickle.load(open(cachedir + '/root.dmeta','r'))
         	self.files[path]['st_uid'] = uid
@@ -132,34 +147,58 @@ class FS(Operations):
 			self.venus.is_dc()
 		except AttributeError:
 			self.dc = True
+		if self.dc == False:
+			self.venus.reintegration()
 		self.venus.fetch_meta(self.dc)
+
 		self.files = pickle.load(open(cachedir + '/root.dmeta','r'))
 		logger.info("Creating a new file %s with mode %s" % (path, mode))
 		res = self.venus.create(path, mode, self.dc)
-	 
+
+		self.log.append(dict(TIME=ctime(time()), ops='create', path=path, mode=mode, data='', meta='', dc=self.dc))	
+
 		if (res is not None and res['Status'] == False) or (res is None):
 			logger.info('Status is false')
 			#File does not exist
 			self.files[path] = dict(st_mode=(S_IFREG | mode), st_nlink=1,
 					st_size=0, st_ctime=time(), st_mtime=time(),
 					st_atime=time())
-		
-			self.venus.update_meta(path, pickle.dumps(self.files[path]), self.dc)	
-	
+			#Case when server failed in between server check and the following server write
+			try:
+				self.venus.update_meta(path, pickle.dumps(self.files[path]), self.dc)
+			except:
+				self.dc = True	
+			
+			self.log.append(dict(TIME=ctime(time()), ops='update_meta', path=path,\
+				 mode='', data='', meta=pickle.dumps(self.files[path]), dc=self.dc))	
+
 			#Not root directory
 			if len(path.split('/')) != 2:
 				logger.info('File created in non-root dir')
 				newpath = path[:path.rfind('/')]
 				self.files[newpath]['f_dir'].append(path)
 				#Store parentdir metadata in server
-				self.venus.update_meta(newpath, pickle.dumps(self.files[newpath]), self.dc)
+				try:
+					self.venus.update_meta(newpath, pickle.dumps(self.files[newpath]), self.dc)
+				except:
+					self.dc = True
+
+				self.log.append(dict(TIME=ctime(time()), ops='update_meta', path=newpath,\
+					mode='', data='', meta=pickle.dumps(self.files[newpath]), dc=self.dc))	
+				
 				#Update local root dmeta copy	
 				pickle.dump(self.files[newpath], open(cachedir + newpath + '.dmeta', 'w+'))
 			else:
 			#Root directory
 				logger.info('File created in root directory')
 				self.files['/']['f_dir'].append(path)
-				self.venus.update_meta('/', pickle.dumps(self.files['/']), self.dc)
+				try:
+					self.venus.update_meta('/', pickle.dumps(self.files['/']), self.dc)
+				except:
+					self.dc = True
+
+				self.log.append(dict(TIME=ctime(time()), ops='update_meta', path='/',\
+				 mode='', data='', meta=pickle.dumps(self.files['/']), dc=self.dc))	
 
 			pickle.dump(self.files, open(cachedir + '/root.dmeta', 'w')) 
 			#Store newfile meta
@@ -192,6 +231,7 @@ class FS(Operations):
                         f.write(res['Content-x'])
 			f.close()
 		
+		pickle.dump(self.log, open(cachedir + '/log.txt', 'w+'))	 
 		return self.fd + 1
 
     	def getattr(self, path, fh = None):
@@ -206,8 +246,13 @@ class FS(Operations):
 		except AttributeError:
 			self.dc = True
 
+		if self.dc == False:
+			self.venus.reintegration()
 		self.venus.fetch_meta(self.dc)
-		self.files = pickle.load(open(cachedir + '/root.dmeta','r'))
+		try:
+			self.files = pickle.load(open(cachedir + '/root.dmeta','r'))
+		except:
+			pass
 		"""If file not present, return error"""
         	if path not in self.files:
             		raise FuseOSError(ENOENT)
@@ -262,6 +307,8 @@ class FS(Operations):
 			self.venus.is_dc()
 		except AttributeError:
 			self.dc = True
+		if self.dc == False:
+			self.venus.reintegration()
 		self.venus.fetch_meta(self.dc)
 		self.files = pickle.load(open(cachedir + '/root.dmeta','r'))
 		logger.info("Creating new directory %s with mode %s" % (path, mode))
@@ -311,10 +358,20 @@ class FS(Operations):
 		except AttributeError:
 			self.dc = True
 		self.venus.fetch_meta(self.dc)
+
 		self.files = pickle.load(open(cachedir + '/root.dmeta','r'))
 		res = self.venus.read(path, self.dc)
+
 		if res['Status'] == True:
 			logger.info('Obtained file contents')
+			#Writing data and metadata of fetched file
+			f = open(cachedir + path, 'w')
+			f.write(res['Content-x'])
+			f.close()
+			f = open(cachedir + path + '.meta', 'w')
+			f.write(res['Meta'])
+			f.close()
+
 			return res['Content-x'][offset:offset + size]
 		elif res['Status'] == False:
 			raise FuseOSError(ENOENT)
@@ -412,6 +469,8 @@ class FS(Operations):
 			self.venus.is_dc()
 		except AttributeError:
 			self.dc = True
+		if self.dc == False:
+			self.venus.reintegration()
 		self.venus.fetch_meta(self.dc)
 		self.files = pickle.load(open(cachedir + '/root.dmeta','r'))
 		logger.info("Removing %s", path)
@@ -506,6 +565,8 @@ class FS(Operations):
 			self.venus.is_dc()
 		except AttributeError:
 			self.dc = True
+		if self.dc == False:
+			self.venus.reintegration()
 		self.venus.fetch_meta(self.dc)
 		self.files = pickle.load(open(cachedir + '/root.dmeta','r'))
 
@@ -547,6 +608,9 @@ class FS(Operations):
 			self.venus.is_dc()
 		except AttributeError:
 			self.dc = True
+
+		if self.dc == False:
+			self.venus.reintegration()
 		self.venus.fetch_meta(self.dc)
 		self.files = pickle.load(open(cachedir + '/root.dmeta','r'))
 
@@ -562,7 +626,15 @@ class FS(Operations):
 		f.write(data)
 		f.close()
 		
-		self.venus.write(path, data, pickle.dumps(self.files[path]), self.dc)
+		try:
+			self.venus.write(path, data, pickle.dumps(self.files[path]), self.dc)
+		except:
+			self.dc = True
+
+		self.log.append(dict(TIME=ctime(time()), ops='write', path=path,\
+				 mode='', data=data, meta=pickle.dumps(self.files[path]), dc=self.dc))	
+		pickle.dump(self.log, open(cachedir + '/log.txt', 'w'))
+
         	return len(data)
 
 
@@ -575,5 +647,8 @@ if __name__ == '__main__':
 	
 	logger.info('File System mounted at /%s' % argv[1])
 	cachedir += argv[1]
+
+	if not os.path.isfile(cachedir + '/log.txt'):
+		open(cachedir + '/log.txt', 'w+')
 
     	fuse = FUSE(FS(), argv[1], foreground = True)
