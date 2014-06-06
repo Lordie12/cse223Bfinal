@@ -21,16 +21,6 @@ else:
 clock = log['Clock']
 files = {}
 
-def invalidate_copies(known_clients):
-	for clients in known_clients:
-		logger.info('Invaliding %s' % clients)
-		#Sending new metadata to all clients server knows of
-		if True: #clients != self._conn.root:
-			try:
-				clients.invalidate(pickle.dumps(open(sname + '/root.dmeta', 'r').read()))
-			except:
-				pass
-
 def myhash(inp):
 	h = hashlib.new('ripemd160')
 	h.update(inp)
@@ -123,6 +113,22 @@ class MyService(rpyc.Service):
 		files['/'] = pickle.loads(data)
 		pickle.dump(files, open(sname + '/root.dmeta', 'w'))
 		return True
+
+	def ABCAST(self):
+	"""First method to be called on each exposed_method called
+	by client"""
+
+	def exposed_PREPARE(self):
+	"""For prepare messages to himself and other servers"""
+
+	def exposed_confirm(self):
+	"""For confirm messages to himself and other servers"""
+
+	def exposed_cleanup(self):
+	"""Cleanup method"""
+
+	def exposed_is_alive(self):
+	"""Check if server is alive"""
 	
 	def exposed_create(self, path):
 		"""Check if a file exists, if not create 
@@ -145,7 +151,6 @@ class MyService(rpyc.Service):
 
 		res = self.process_log(ID)
 
-		start_new_thread(invalidate_copies, (known_clients,))
 		return res
 
 	def exposed_read(self, path):		
@@ -184,18 +189,6 @@ class MyService(rpyc.Service):
 
 		res = self.process_log(ID)
 
-		'''
-		Unable to pickle and invalidate clients,
-		so lets call update metadata on each FUSE operation
-		#Invalidating everyone else's copy here
-		for clients in known_clients:
-			#Sending new metadata to all clients server knows of
-			if True: #clients != self._conn.root:
-				try:
-					clients.invalidate(pickle.dumps(open(sname + '/root.dmeta', 'r').read()))
-				except:
-					pass
-		'''
 		return res
 
 	def exposed_fetch_meta(self):
@@ -205,7 +198,6 @@ class MyService(rpyc.Service):
 			return None
 
 	def on_connect(self):
-		global known_clients , lock
 
 		'''
 		if os.path.isfile('/servercache/root.dmeta'):

@@ -39,12 +39,11 @@ class Venus:
 		log = None
 		if os.path.isfile(cachedir + '/log.txt'):
 			try:
-				log = pickle.load(open(cachedir + '/log.txt'), 'r')
+				log = pickle.load(open(cachedir + '/log.txt', 'r'))
 			except: 
 				pass
 	
-		print 'Calling reintegration'
-		#AMAZING REINTEGRATION, SOME PRO CODING DONE HERE	
+		print 'Calling reintegration', log
 		if log is not None:
 			for line in log:
 				if line['ops'] == 'update_meta':

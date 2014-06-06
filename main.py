@@ -155,7 +155,7 @@ class FS(Operations):
 		logger.info("Creating a new file %s with mode %s" % (path, mode))
 		res = self.venus.create(path, mode, self.dc)
 
-		self.log.append(dict(TIME=ctime(time()), ops='create', path=path, mode=mode, data='', meta='', dc=self.dc))	
+		self.log.append(dict(TIME=ctime(time()), ops='create', path=path, mode=mode, data='', meta='', dc=False))	
 
 		if (res is not None and res['Status'] == False) or (res is None):
 			logger.info('Status is false')
@@ -170,7 +170,7 @@ class FS(Operations):
 				self.dc = True	
 			
 			self.log.append(dict(TIME=ctime(time()), ops='update_meta', path=path,\
-				 mode='', data='', meta=pickle.dumps(self.files[path]), dc=self.dc))	
+				 mode='', data='', meta=pickle.dumps(self.files[path]), dc=False))	
 
 			#Not root directory
 			if len(path.split('/')) != 2:
@@ -184,7 +184,7 @@ class FS(Operations):
 					self.dc = True
 
 				self.log.append(dict(TIME=ctime(time()), ops='update_meta', path=newpath,\
-					mode='', data='', meta=pickle.dumps(self.files[newpath]), dc=self.dc))	
+					mode='', data='', meta=pickle.dumps(self.files[newpath]), dc=False))	
 				
 				#Update local root dmeta copy	
 				pickle.dump(self.files[newpath], open(cachedir + newpath + '.dmeta', 'w+'))
@@ -198,7 +198,7 @@ class FS(Operations):
 					self.dc = True
 
 				self.log.append(dict(TIME=ctime(time()), ops='update_meta', path='/',\
-				 mode='', data='', meta=pickle.dumps(self.files['/']), dc=self.dc))	
+				 mode='', data='', meta=pickle.dumps(self.files['/']), dc=False))	
 
 			pickle.dump(self.files, open(cachedir + '/root.dmeta', 'w')) 
 			#Store newfile meta
@@ -632,7 +632,7 @@ class FS(Operations):
 			self.dc = True
 
 		self.log.append(dict(TIME=ctime(time()), ops='write', path=path,\
-				 mode='', data=data, meta=pickle.dumps(self.files[path]), dc=self.dc))	
+				 mode='', data=data, meta=pickle.dumps(self.files[path]), dc=False))	
 		pickle.dump(self.log, open(cachedir + '/log.txt', 'w'))
 
         	return len(data)
