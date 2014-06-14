@@ -3,6 +3,7 @@
 import os, rpyc, hashlib, sys, pickle
 
 cachedir = ''
+clock = 0
 
 def hash(filename):
 	return hashlib.md5(filename).hexdigest()
@@ -18,7 +19,6 @@ class Callback(rpyc.Service):
 		f.write(pickle.loads(meta))
 		f.close()
 			
-
 class Venus:
 	"""Local Venus cache manager, checks 
 	cache for file, returns local FD if file exists,
@@ -27,11 +27,16 @@ class Venus:
 		self.conn = None
 		global cachedir
 		cachedir = mydir
-		f = open('/Users/Lanfear/Desktop/Spring 14/CSE223B/cse223Bfinal/coda_remote/list', 'r')
+		self.storeID = hash(cachedir)
+
+		f = open('/Users/Lanfear/Desktop/Drive/Spring 14/CSE223B/cse223Bfinal/coda_remote/list', 'r')
+		#skipping first port number, which is the keeper IP
+		next(f)
 		for servers in f:
 			hostname, port = servers.split(':')
 			try:
 				self.conn = rpyc.connect(hostname, int(port), service=Callback)
+				break
 			except:	
 				continue
 
@@ -43,7 +48,6 @@ class Venus:
 			except: 
 				pass
 	
-		print 'Calling reintegration', log
 		if log is not None:
 			for line in log:
 				if line['ops'] == 'update_meta':
@@ -57,9 +61,12 @@ class Venus:
 				pickle.dump(log, open(cachedir + '/log.txt', 'w'))
 
 	def create(self, path, mode, dc):
+		global clock
 		#If remote file also does not exist, then create
 		if dc == False:
-			return self.conn.root.create(path)
+			clock += 1
+			return self.conn.root.create(path, pickle.dumps(dict(storeID=self.storeID\
+				, Clock=clock)))
 	
 	def is_dc(self):
 		return self.conn.root.is_dc()
@@ -73,8 +80,11 @@ class Venus:
 			return self.conn.root.read(path)
 
 	def write(self, path, data, meta, dc):
+		global clock
 		if dc == False:
-			return self.conn.root.write(path, data, meta)
+			clock += 1
+			return self.conn.root.write(path, data, meta, pickle.dumps(dict(storeID=self.storeID\
+				, Clock=clock)))
 
 	def meta(self, data, dc):
 		if dc == False:

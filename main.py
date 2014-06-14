@@ -162,13 +162,16 @@ class FS(Operations):
 			#File does not exist
 			self.files[path] = dict(st_mode=(S_IFREG | mode), st_nlink=1,
 					st_size=0, st_ctime=time(), st_mtime=time(),
-					st_atime=time())
+					st_atime=time(), storeID = dict(ID=None, Clock=0))
+			
+			'''
 			#Case when server failed in between server check and the following server write
 			try:
 				self.venus.update_meta(path, pickle.dumps(self.files[path]), self.dc)
 			except:
 				self.dc = True	
-			
+			'''
+
 			self.log.append(dict(TIME=ctime(time()), ops='update_meta', path=path,\
 				 mode='', data='', meta=pickle.dumps(self.files[path]), dc=False))	
 
@@ -362,7 +365,7 @@ class FS(Operations):
 		self.files = pickle.load(open(cachedir + '/root.dmeta','r'))
 		res = self.venus.read(path, self.dc)
 
-		if res['Status'] == True:
+		if res is not None and res['Status'] == True:
 			logger.info('Obtained file contents')
 			#Writing data and metadata of fetched file
 			f = open(cachedir + path, 'w')
@@ -373,7 +376,7 @@ class FS(Operations):
 			f.close()
 
 			return res['Content-x'][offset:offset + size]
-		elif res['Status'] == False:
+		elif res is not None and res['Status'] == False:
 			raise FuseOSError(ENOENT)
  
         	return self.data[path][offset:offset + size]

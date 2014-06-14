@@ -1,6 +1,6 @@
 #!/usr/bin/python
 
-import rpyc, os, pickle, socket, sys, threading, getopt, hashlib
+import rpyc, os, pickle, socket, sys, threading, getopt, hashlib, re
 from pyftpdlib.log import logger
 from pyftpdlib.ioloop import _config_logging
 from rpyc.utils.server import *
@@ -20,16 +20,27 @@ else:
 
 clock = log['Clock']
 files = {}
+myport = None
+
+def natural_sort(l): 
+    convert = lambda text: int(text) if text.isdigit() else text.lower() 
+    alphanum_key = lambda key: [ convert(c) for c in re.split('([0-9]+)', key) ] 
+    return sorted(l, key = alphanum_key)
 
 def myhash(inp):
 	h = hashlib.new('ripemd160')
 	h.update(inp)
-	return h.hexdigest()
+	return h.hexdigest() 
 
 class MyService(rpyc.Service):
 	def process_log(self, ID):
 
+		"""First sort according to storeID<ID, clock>, now process log from CP 
+		upto ID,  but if any non checked line encountered, return false or error"""
+	
 		global log, files
+		#log sorted according to clock and then STORE ID
+		#log = natural_sort(log)
 		logger.info('Start log processing with CP %d and ID %d' % (log['CP'], ID))
 		res = {}
 
@@ -70,6 +81,12 @@ class MyService(rpyc.Service):
 				pickle.dump(log, open(sname + '/log.txt', 'w+'))
 
 			elif log['OPS'][r]['OP'] == 'WRITE': 
+	
+				curr_meta = pickle.load(open(sname + path + '.meta', 'r'))
+				print curr_meta
+				if curr_meta['storeID']['ID']  == None:
+					continue
+
 				logger.info('Processing WRITE with CP %d ID %d' % (log['CP'], ID))
 				#Writing into server copy
 				open(sname + path, 'w+').write(log['OPS'][r]['CONTENT'])
@@ -114,45 +131,6 @@ class MyService(rpyc.Service):
 		pickle.dump(files, open(sname + '/root.dmeta', 'w'))
 		return True
 
-	def ABCAST(self):
-	"""First method to be called on each exposed_method called
-	by client"""
-
-	def exposed_PREPARE(self):
-	"""For prepare messages to himself and other servers"""
-
-	def exposed_confirm(self):
-	"""For confirm messages to himself and other servers"""
-
-	def exposed_cleanup(self):
-	"""Cleanup method"""
-
-	def exposed_is_alive(self):
-	"""Check if server is alive"""
-	
-	def exposed_create(self, path):
-		"""Check if a file exists, if not create 
-		the file"""
-		global lock, log, clock
-
-		with lock:
-			logger.info('Create acquiring lock')
-			if os.path.isfile(sname + '/log.txt'):
-				log = pickle.load(open(sname + '/log.txt', 'r'))
-
-			log['OPS'].append(dict(ID=clock, TIME=ctime(time()), ADDR=self._conn._config['endpoints'][1][0] + \
-				':' + str(self._conn._config['endpoints'][1][1]), OP='CREATE', PATH=path))
-
-			ID = clock
-			clock += 1
-			log['Clock'] += 1
-			pickle.dump(log, open(sname + '/log.txt', 'w+'))
-			logger.info('ID %d and File check for %s' % (ID, sname + path))
-
-		res = self.process_log(ID)
-
-		return res
-
 	def exposed_read(self, path):		
 		global log, clock
 		ts = str(ctime(time())) + ', ACCESS: ' + self._conn._config['endpoints'][1][0] +\
@@ -172,14 +150,148 @@ class MyService(rpyc.Service):
 	
 		return self.process_log(ID)
 
-	def exposed_write(self, path, data, meta):
+
+	def exposed_ABCAST(self, log, entry):
+		"""First method to be called on each exposed_method called
+		by client"""
+		"""Called on any method like write, create with the log
+		first prepare on everymethod with passed log, return a timestamp
+		this is the lamport clock and ID of server
+		select max and send this to expose_confirm to confirm
+		if everyone confirms(write to log), process log"""
+		"""now execute query after everyone confirmed i.e., process_log"""
+		global myport
+
+		logger.info('Calling ABCAST here')
+		listofports = [1000, 2222, 2223, 2224, 2225, 2226]
+		reply = []
+		clock = []
+		connlist = []
+
+		for port in listofports:
+			if port != myport:
+				try:
+					conn = rpyc.connect('localhost', port, service=MyService)
+					ret = conn.root.PREPARE(entry)
+					reply.append(ret)
+					clock.append(ret['Clock'])
+					connlist.append(conn)
+				except:
+					continue
+
+		mc = max(clock)
+		#TODO: Get only one duplicate out based on sorted serverID
+		duplicates = [k for k in reply if k['Clock'] == mc]
+		entry['storeID'] = duplicates[0]
+		#TODO: Error sometimes causing multiple entries to show
+		
+		with lock:
+			for conn2 in connlist:
+				try:
+					conn2.root.confirm(entry)
+				except:
+					continue
+
+	def clock_ops(self):
+		global clock
+		res = {'Clock' : clock, 'storeID' : sname[1:]}
+		clock += 1
+		return res
+
+	def exposed_PREPARE(self, entry):
+		"""For prepare messages to himself and other servers"""
+		"""Add log entry to queue and store ID = <ID, clock>"""
+		"""Checked field, is set to false in prepare"""
+		global log, lock
+
+		logger.info('Calling PREPARE')
+		
+		#Locking my logging procedure
+		with lock:
+			k = self.clock_ops()
+			entry['storeID']['Clock'] = k['Clock']
+			entry['storeID']['storeID'] = k['storeID']
+			try:
+				log['OPS'].append(entry)
+				logger.info('Successfully appended to log in prepare')
+				print 'PREPARE APPEND', log
+			except KeyError:
+				pass
+		
+		return k
+
+	def exposed_confirm(self, entry):
+		"""For confirm messages to himself and other servers"""
+		"""confirm is passed the ID by prepare, changes timestamp to whatever
+		is sent to it"""
+		"""checked field set to true here"""
+		global log
+		logger.info('Calling confirm')
+		print 'LOG', log
+		print 'CONFIRM', entry
+
+		entry['CHECKED'] = True
+		for line in log['OPS']:
+			print line
+			if line['logID'] == str(entry['storeID']['Clock']) + '/' + entry['storeID']['storeID']:
+				line['storeID'] = entry['storeID']
+
+	def exposed_cleanup(self):
+		"""Cleanup method"""
+		pass
+
+	def exposed_commit(self):
+		"""Commit method"""
+		#For now, confirm commits too, log processes entry if commit is ready
+		pass
+
+	def exposed_test(self):
+		logger.info('Called Test')
+
+	def exposed_create(self, path, storeID):
+		"""Check if a file exists, if not create 
+		the file"""
+		global lock, log, clock
+
+		with lock:
+			logger.info('Create acquiring lock')
+			if os.path.isfile(sname + '/log.txt'):
+				try:
+					log = pickle.load(open(sname + '/log.txt', 'r'))
+				except:
+					pass
+
+			k = dict(logID=str(clock) + sname, ID=clock, TIME=ctime(time()), ADDR=self._conn._config['endpoints'][1][0] + \
+				':' + str(self._conn._config['endpoints'][1][1]), OP='CREATE', PATH=path,\
+				 storeID = pickle.loads(storeID), CHECKED=False)
+			k['storeID']['Clock'] = clock
+			k['storeID']['storeID'] = sname[1:]
+	
+			log['OPS'].append(k)
+
+			ID = clock
+			clock += 1
+			log['Clock'] += 1
+			pickle.dump(log, open(sname + '/log.txt', 'w+'))
+			logger.info('ID %d and File check for %s' % (ID, sname + path))
+
+
+		self.exposed_ABCAST(log['OPS'], k)
+
+		#res = self.process_log(ID)
+
+		return None#res
+
+
+	def exposed_write(self, path, data, meta, ID):
 		
 		global log, clock, lock
 
 		with lock:
 			path.encode('ascii', 'ignore')
 			log['OPS'].append(dict(ID=clock, TIME=ctime(time()), ADDR= self._conn._config['endpoints'][1][0] +\
-			':' + str(self._conn._config['endpoints'][1][1]), OP='WRITE', PATH=path, CONTENT = data, META = meta))
+			':' + str(self._conn._config['endpoints'][1][1]), OP='WRITE', PATH=path, CONTENT = data, \
+				META = meta, storeID = ID))
 
 			pickle.dump(log, open(sname + '/log.txt', 'w+'))
 		
@@ -198,18 +310,7 @@ class MyService(rpyc.Service):
 			return None
 
 	def on_connect(self):
-
-		'''
-		if os.path.isfile('/servercache/root.dmeta'):
-			files = pickle.load(open('/servercache/root.dmeta', 'r'))
-		else:
-			open('/servercache/root.dmeta', 'w+')
-
-		logger.info('Client connected')
-		if os.path.isfile('/servercache/log.txt'):
-			log = pickle.load(open('/servercache/log.txt', 'r'))
-		'''
-        # code that runs when a connection is created
+		pass
 
     	def on_disconnect(self):
         # code that runs when the connection has already closed
@@ -230,13 +331,11 @@ if __name__ == "__main__":
 		elif opt in ['-p', '--port']:
 			port = int(args)
 
-	t = ThreadedServer(MyService, hostname=hostname, port = port)
+	t = ThreadedServer(MyService, hostname=hostname, port=port)
 	logger.info('Server started at host %s and port %d' % (hostname, port))
 	try:
 		sname = hostname + str(port) + '/scache'
 		sname = '/' + myhash(sname)
-    		t.start()
+		t.start()
 	except:
 		raise
-	
-		
